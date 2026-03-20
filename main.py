@@ -6,7 +6,7 @@ import plotly.express as px
 from fpdf import FPDF
 import io
 
-# Set page to wide mode for better dashboard viewing on mobile
+# Set page configuration
 st.set_page_config(page_title="Hisaab Pro", layout="wide")
 st.title("🏡 Household Hisaab & Budgeting")
 
@@ -29,11 +29,8 @@ CATEGORIES = [
 df = conn.read()
 
 if not df.empty:
-    # Ensure Amount is numeric
     df["Amount"] = pd.to_numeric(df["Amount"], errors='coerce').fillna(0)
-    # Ensure Date is a datetime object
     df["Date"] = pd.to_datetime(df["Date"], errors='coerce')
-    # Remove any rows where the date couldn't be parsed
     df = df.dropna(subset=['Date'])
 
 # --- SIDEBAR: BUDGET SETTINGS ---
@@ -72,13 +69,12 @@ if not df.empty:
     ).fillna(0)
     st.dataframe(pivot_table.style.format("₹{:,.0f}"), width='stretch')
 
-# --- SECTION 3: ADD NEW EXPENSE (FIXED SYNTAX) ---
+# --- SECTION 3: ADD NEW EXPENSE ---
 with st.expander("➕ Add New Expense", expanded=False):
     with st.form("entry_form", clear_on_submit=True):
         amt = st.number_input("Amount (₹)", min_value=0.0)
         cat = st.selectbox("Category", CATEGORIES)
         nte = st.text_area("Note (Optional)")
-        # FIXED LINE 86:
         dte = st.date_input("Date", datetime.now())
         
         if st.form_submit_button("Save to Google Sheets"):
@@ -104,7 +100,7 @@ if search_query and not filtered_df.empty:
 if not filtered_df.empty:
     st.dataframe(filtered_df.sort_values(by="Date", ascending=False), width='stretch')
 
-# --- SECTION 5: PDF GENERATOR ---
+# --- SECTION 5: PDF GENERATOR (FIXED SYNTAX) ---
 def create_pdf(dataframe, budget_dict):
     pdf = FPDF()
     pdf.add_page()
@@ -112,4 +108,50 @@ def create_pdf(dataframe, budget_dict):
     pdf.cell(190, 10, "Household Hisaab Monthly Report", align='C', new_x="LMARGIN", new_y="NEXT")
     pdf.ln(10)
     
-    pdf.set_font("helvetica", "B", 12
+    # FIXED LINE 115: Added closing parenthesis
+    pdf.set_font("helvetica", "B", 12)
+    pdf.cell(95, 10, "Category", border=1)
+    pdf.cell(95, 10, "Total Spent", border=1, new_x="LMARGIN", new_y="NEXT")
+    
+    pdf.set_font("helvetica", "", 12)
+    current_m = datetime.now().strftime('%Y-%m')
+    dataframe['Date'] = pd.to_datetime(dataframe['Date'])
+    m_df = dataframe[dataframe['Date'].dt.strftime('%Y-%m') == current_m]
+    
+    for category in CATEGORIES:
+        total = m_df[m_df['Category'] == category]['Amount'].sum()
+        pdf.cell(95, 10, category, border=1)
+        pdf.cell(95, 10, f"Rs. {total:,.2f}", border=1, new_x="LMARGIN", new_y="NEXT")
+        
+    return bytes(pdf.output())
+
+st.divider()
+st.subheader("📋 Export Data")
+if st.button("Generate PDF Report"):
+    try:
+        pdf_bytes = create_pdf(df, budgets)
+        st.download_button(
+            label="📩 Download PDF Report",
+            data=pdf_bytes,
+            file_name=f"Hisaab_Report_{datetime.now().strftime('%b_%Y')}.pdf",
+            mime="application/pdf"
+        )
+    except Exception as e:
+        st.error(f"Could not generate PDF: {e}")
+
+# --- SECTION 6: DELETE ENTRY ---
+with st.expander("🗑️ Delete an Entry"):
+    if not df.empty:
+        delete_options = df.copy()
+        delete_options['Display'] = (
+            delete_options['Date'].dt.strftime('%Y-%m-%d') + 
+            " | ₹" + delete_options['Amount'].astype(str) + 
+            " | " + delete_options['Note'].astype(str)
+        )
+        to_del = st.selectbox("Select entry to remove:", options=delete_options['Display'].tolist())
+        
+        if st.button("Confirm Delete", type="primary"):
+            target_idx = delete_options[delete_options['Display'] == to_del].index[0]
+            final_df = df.drop(target_idx)
+            conn.update(data=final_df)
+            st.rerun()
