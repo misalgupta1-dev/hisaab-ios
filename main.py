@@ -3,57 +3,96 @@ from streamlit_gsheets import GSheetsConnection
 import pandas as pd
 from datetime import datetime
 import plotly.express as px
+from fpdf import FPDF
+import io
 
-st.set_page_config(page_title="Hisaab", layout="wide")
-st.title("🏡 Household Hisaab")
+st.set_page_config(page_title="Hisaab Pro", layout="wide")
+st.title("🏡 Household Hisaab & Budgeting")
 
 # Connection
 conn = st.connection("gsheets", type=GSheetsConnection)
 
-# Categories
-CATEGORIES = ["Housing & Utilities", "Food & Dining", "Transportation & Travel", 
-              "Health & Wellness", "Shopping & Lifestyle", "Education & Career", 
-              "Financial & Legal", "Other/Misc"]
+# 1. CATEGORIES
+CATEGORIES = [
+    "Housing & Utilities", "Food & Dining", "Transportation & Travel", 
+    "Health & Wellness", "Shopping & Lifestyle", "Education & Career", 
+    "Financial & Legal", "Other/Misc"
+]
 
 # Load Data
 df = conn.read()
 if not df.empty:
     df["Amount"] = pd.to_numeric(df["Amount"], errors='coerce').fillna(0)
+    df["Date"] = pd.to_datetime(df["Date"])
 
-# --- DASHBOARD ---
-if not df.empty and df["Amount"].sum() > 0:
-    fig = px.pie(df, values='Amount', names='Category', hole=0.4)
-    st.plotly_chart(fig, use_container_width=True)
+# --- BUDGET SETTINGS (Sidebar) ---
+st.sidebar.header("⚙️ Budget Settings")
+budgets = {}
+for cat in CATEGORIES:
+    budgets[cat] = st.sidebar.number_input(f"Limit: {cat}", min_value=0, value=10000, step=500)
+
+# --- BUDGET TRACKER ---
+st.subheader("⚠️ Monthly Budget Tracker")
+if not df.empty:
+    curr_month = datetime.now().strftime('%Y-%m')
+    this_month_df = df[df['Date'].dt.strftime('%Y-%m') == curr_month]
+    
+    for cat in CATEGORIES:
+        spent = this_month_df[this_month_df['Category'] == cat]['Amount'].sum()
+        limit = budgets[cat]
+        percent = min(spent / limit, 1.0) if limit > 0 else 0
+        st.progress(percent, text=f"{cat}: ₹{spent:,.0f} / ₹{limit:,.0f}")
+
+# --- COMPARISON TABLE ---
+st.subheader("📈 Monthly Comparison")
+if not df.empty:
+    compare_df = df.copy()
+    compare_df['MonthYear'] = compare_df['Date'].dt.strftime('%b %Y')
+    pivot_table = compare_df.pivot_table(index='Category', columns='MonthYear', values='Amount', aggfunc='sum').fillna(0)
+    st.dataframe(pivot_table.style.format("₹{:,.0f}"), use_container_width=True)
 
 # --- ADD EXPENSE ---
-with st.expander("➕ Add New Expense", expanded=False):
+with st.expander("➕ Add New Expense"):
     with st.form("entry_form", clear_on_submit=True):
         amt = st.number_input("Amount (₹)", min_value=0.0)
         cat = st.selectbox("Category", CATEGORIES)
-        nte = st.text_input("Note")
+        nte = st.text_area("Note")
+        dte = st.date_input("Date", datetime.now())
         if st.form_submit_button("Save"):
-            new_row = pd.DataFrame([{"Date": datetime.now().strftime("%Y-%m-%d"), "Amount": amt, "Category": cat, "Note": nte}])
+            new_row = pd.DataFrame([{"Date": dte.strftime("%Y-%m-%d"), "Amount": amt, "Category": cat, "Note": nte}])
             conn.update(data=pd.concat([df, new_row], ignore_index=True))
             st.rerun()
 
-# --- DELETE EXPENSE SECTION ---
-st.subheader("🗑️ Delete/Manage Expenses")
-if not df.empty:
-    # We create a list of options for the user to pick which one to delete
-    # Formatting it so it's easy to read on a phone
-    df_display = df.copy()
-    df_display['Selection'] = df_display['Date'].astype(str) + " | ₹" + df_display['Amount'].astype(str) + " | " + df_display['Note']
+# --- PDF EXPORT FUNCTION ---
+def create_pdf(dataframe, budget_dict):
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("Arial", "B", 16)
+    pdf.cell(190, 10, "Household Hisaab Monthly Report", ln=True, align='C')
+    pdf.ln(10)
     
-    to_delete = st.selectbox("Select an expense to remove:", options=df_display['Selection'].tolist())
+    pdf.set_font("Arial", "B", 12)
+    pdf.cell(95, 10, "Category", border=1)
+    pdf.cell(95, 10, "Total Spent (Current Month)", border=1, ln=True)
     
-    if st.button("Delete Selected Expense", type="primary"):
-        # Find the index of the selected row and drop it
-        index_to_drop = df_display[df_display['Selection'] == to_delete].index[0]
-        updated_df = df.drop(index_to_drop)
+    pdf.set_font("Arial", "", 12)
+    curr_month = datetime.now().strftime('%Y-%m')
+    curr_df = dataframe[dataframe['Date'].dt.strftime('%Y-%m') == curr_month]
+    
+    for cat in CATEGORIES:
+        spent = curr_df[curr_df['Category'] == cat]['Amount'].sum()
+        pdf.cell(95, 10, cat, border=1)
+        pdf.cell(95, 10, f"Rs. {spent:,.2f}", border=1, ln=True)
         
-        # Update Google Sheets
-        conn.update(data=updated_df)
-        st.success("Deleted successfully!")
-        st.rerun()
-else:
-    st.info("No expenses found to delete.")
+    return pdf.output()
+
+st.divider()
+st.subheader("📋 Export Report")
+if st.button("Generate PDF Report"):
+    pdf_data = create_pdf(df, budgets)
+    st.download_button(
+        label="Download PDF",
+        data=pdf_data,
+        file_name=f"Hisaab_Report_{datetime.now().strftime('%b_%Y')}.pdf",
+        mime="application/pdf"
+    )
