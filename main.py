@@ -4,74 +4,56 @@ import pandas as pd
 from datetime import datetime
 import plotly.express as px
 
-st.set_page_config(page_title="Household Hisaab", layout="wide")
-st.title("🏡 Household Hisaab & Analytics")
+st.set_page_config(page_title="Hisaab", layout="wide")
+st.title("🏡 Household Hisaab")
 
-# Connection to Google Sheets
+# Connection
 conn = st.connection("gsheets", type=GSheetsConnection)
 
-# 1. YOUR SPECIFIC CATEGORIES
-CATEGORIES = [
-    "Housing & Utilities", 
-    "Food & Dining", 
-    "Transportation & Travel", 
-    "Health & Wellness", 
-    "Shopping & Lifestyle", 
-    "Education & Career", 
-    "Financial & Legal",
-    "Other/Misc"
-]
+# Categories
+CATEGORIES = ["Housing & Utilities", "Food & Dining", "Transportation & Travel", 
+              "Health & Wellness", "Shopping & Lifestyle", "Education & Career", 
+              "Financial & Legal", "Other/Misc"]
 
 # Load Data
 df = conn.read()
-# Ensure numeric columns and date format
 if not df.empty:
     df["Amount"] = pd.to_numeric(df["Amount"], errors='coerce').fillna(0)
-    df["Date"] = pd.to_datetime(df["Date"]).dt.date
 
-# --- DASHBOARD SECTION ---
-st.subheader("📊 Spending Breakdown")
+# --- DASHBOARD ---
 if not df.empty and df["Amount"].sum() > 0:
-    # Create the Pie Chart
-    fig = px.pie(df, values='Amount', names='Category', hole=0.5,
-                 color_discrete_sequence=px.colors.qualitative.Pastel)
+    fig = px.pie(df, values='Amount', names='Category', hole=0.4)
     st.plotly_chart(fig, use_container_width=True)
-else:
-    st.info("No spending data available yet. Start by adding an expense below!")
 
-st.divider()
-
-# --- INPUT SECTION ---
-col1, col2 = st.columns([1, 1])
-
-with col1:
-    st.subheader("📝 Add New Expense")
-    with st.form("expense_form", clear_on_submit=True):
-        amount = st.number_input("Amount (₹)", min_value=0.0, step=10.0)
-        category = st.selectbox("Category", CATEGORIES)
-        note = st.text_area("What was this for? (Notes)", placeholder="e.g., March Electricity Bill, Dinner at Wow Momo")
-        date_val = st.date_input("Date", datetime.now())
-        
-        if st.form_submit_button("Save to Hisaab"):
-            new_row = pd.DataFrame([{
-                "Date": date_val.strftime("%Y-%m-%d"), 
-                "Amount": amount, 
-                "Category": category, 
-                "Note": note
-            }])
-            updated_df = pd.concat([df, new_row], ignore_index=True)
-            conn.update(data=updated_df)
-            st.success("Entry Saved!")
+# --- ADD EXPENSE ---
+with st.expander("➕ Add New Expense", expanded=False):
+    with st.form("entry_form", clear_on_submit=True):
+        amt = st.number_input("Amount (₹)", min_value=0.0)
+        cat = st.selectbox("Category", CATEGORIES)
+        nte = st.text_input("Note")
+        if st.form_submit_button("Save"):
+            new_row = pd.DataFrame([{"Date": datetime.now().strftime("%Y-%m-%d"), "Amount": amt, "Category": cat, "Note": nte}])
+            conn.update(data=pd.concat([df, new_row], ignore_index=True))
             st.rerun()
 
-with col2:
-    st.subheader("📜 Recent History")
-    if not df.empty:
-        # Show last 10 transactions
-        st.dataframe(df.iloc[::-1].head(10), use_container_width=True)
-    else:
-        st.write("Your history is empty.")
-
-# --- FULL DATA VIEW ---
-if st.checkbox("Show all transactions"):
-    st.dataframe(df.iloc[::-1], use_container_width=True)
+# --- DELETE EXPENSE SECTION ---
+st.subheader("🗑️ Delete/Manage Expenses")
+if not df.empty:
+    # We create a list of options for the user to pick which one to delete
+    # Formatting it so it's easy to read on a phone
+    df_display = df.copy()
+    df_display['Selection'] = df_display['Date'].astype(str) + " | ₹" + df_display['Amount'].astype(str) + " | " + df_display['Note']
+    
+    to_delete = st.selectbox("Select an expense to remove:", options=df_display['Selection'].tolist())
+    
+    if st.button("Delete Selected Expense", type="primary"):
+        # Find the index of the selected row and drop it
+        index_to_drop = df_display[df_display['Selection'] == to_delete].index[0]
+        updated_df = df.drop(index_to_drop)
+        
+        # Update Google Sheets
+        conn.update(data=updated_df)
+        st.success("Deleted successfully!")
+        st.rerun()
+else:
+    st.info("No expenses found to delete.")
