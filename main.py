@@ -2,61 +2,54 @@ import streamlit as st
 from streamlit_gsheets import GSheetsConnection
 import pandas as pd
 from datetime import datetime
+import plotly.express as px
 
-# --- PAGE CONFIG ---
-st.set_page_config(page_title="My Hisaab", page_icon="💰")
+st.set_page_config(page_title="Hisaab Dashboard", layout="wide")
+st.title("📊 Household Hisaab & Analytics")
 
-st.title("💰 Personal Hisaab (iOS)")
-
-# Create a connection to Google Sheets
+# Connection
 conn = st.connection("gsheets", type=GSheetsConnection)
 
-# --- THE AUTOMATION RECEIVER (Webhook) ---
-# This part catches the 'amt' from your iPhone Shortcut URL
+# 1. HOUSEHOLD CATEGORIES
+CATEGORIES = ["Grocery", "Rent/Bills", "Dining Out", "Transport", "Shopping", "Medical", "Entertainment", "Misc"]
+
+# --- RECEIVER (For your Shortcut) ---
 query_params = st.query_params
-
 if "amt" in query_params:
-    try:
-        amount_received = query_params["amt"]
-        
-        # Read existing data
-        df = conn.read()
-        
-        # Create a new entry
-        new_entry = pd.DataFrame([
-            {
-                "Date": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                "Amount": amount_received,
-                "Note": "Auto-Logged (iOS)"
-            }
-        ])
-        
-        # Add new entry to the old data
-        updated_df = pd.concat([df, new_entry], ignore_index=True)
-        
-        # Update the Google Sheet
-        conn.update(data=updated_df)
-        
-        st.success(f"✅ Automatically Logged: ₹{amount_received}")
-    except Exception as e:
-        st.error(f"Error logging data: {e}")
+    amt = query_params["amt"]
+    df = conn.read()
+    # Defaulting automated SMS to 'Misc' - you can change this later
+    new_data = pd.DataFrame([{"Date": datetime.now().strftime("%Y-%m-%d"), "Amount": float(amt), "Category": "Misc", "Note": "Auto-Logged"}])
+    conn.update(data=pd.concat([df, new_data], ignore_index=True))
+    st.toast(f"Logged ₹{amt}")
 
-# --- DISPLAY SECTION ---
-st.subheader("Recent Transactions")
-try:
-    data = conn.read()
-    # Sort by date so newest is on top
-    st.dataframe(data.iloc[::-1], use_container_width=True)
-except:
-    st.info("No data found. Your first transaction will appear here!")
+# --- DATA LOADING ---
+df = conn.read()
+df["Amount"] = pd.to_numeric(df["Amount"], errors='coerce').fillna(0)
 
-# Manual Entry fallback
-with st.expander("Add Manually"):
-    with st.form("manual_form"):
-        m_amt = st.number_input("Amount", min_value=0)
-        m_note = st.text_input("Note")
-        if st.form_submit_button("Save"):
-            df = conn.read()
-            new_row = pd.DataFrame([{"Date": datetime.now().strftime("%Y-%m-%d %H:%M"), "Amount": m_amt, "Note": m_note}])
+# --- DASHBOARD SECTION ---
+col1, col2 = st.columns([1, 1])
+
+with col1:
+    st.subheader("Spending by Category")
+    if not df.empty:
+        fig = px.pie(df, values='Amount', names='Category', hole=0.4, color_discrete_sequence=px.colors.sequential.RdBu)
+        st.plotly_patch(fig) # Optimized for mobile
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("No data to show yet.")
+
+with col2:
+    st.subheader("Add Expense")
+    with st.form("manual_entry"):
+        m_amt = st.number_input("Amount (₹)", min_value=0.0)
+        m_cat = st.selectbox("Category", CATEGORIES)
+        m_note = st.text_input("Note (Optional)")
+        if st.form_submit_button("Save Expense"):
+            new_row = pd.DataFrame([{"Date": datetime.now().strftime("%Y-%m-%d"), "Amount": m_amt, "Category": m_cat, "Note": m_note}])
             conn.update(data=pd.concat([df, new_row], ignore_index=True))
             st.rerun()
+
+# --- RECENT LOGS ---
+st.subheader("Transaction History")
+st.dataframe(df.iloc[::-1], use_container_width=True)
