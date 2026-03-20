@@ -7,23 +7,21 @@ import plotly.express as px
 st.set_page_config(page_title="Hisaab Pro", layout="wide")
 st.title("🏡 Household Hisaab Dashboard")
 
-# 1. CONNECTION
+# 1. ESTABLISH CONNECTION
 conn = st.connection("gsheets", type=GSheetsConnection)
 
-# 2. DATA LOADING (Force refresh every time)
-df = conn.read(ttl=0)
+# 2. LOAD DATA INTO SESSION STATE (To prevent "overwriting" bugs)
+if "df" not in st.session_state:
+    raw_data = conn.read(ttl=0)
+    if raw_data is not None and not raw_data.empty:
+        raw_data = raw_data.dropna(how='all')
+        raw_data["Amount"] = pd.to_numeric(raw_data["Amount"], errors='coerce').fillna(0)
+        raw_data["Date"] = pd.to_datetime(raw_data["Date"], errors='coerce')
+        st.session_state.df = raw_data.dropna(subset=['Date'])
+    else:
+        st.session_state.df = pd.DataFrame(columns=["Date", "Amount", "Category", "Note"])
 
-# Helper function to clean data
-def clean_data(data):
-    if data is not None and not data.empty:
-        data = data.dropna(how='all')
-        data["Amount"] = pd.to_numeric(data["Amount"], errors='coerce').fillna(0)
-        data["Date"] = pd.to_datetime(data["Date"], errors='coerce')
-        data = data.dropna(subset=['Date'])
-        return data[data['Amount'] > 0]
-    return pd.DataFrame(columns=["Date", "Amount", "Category", "Note"])
-
-df = clean_data(df)
+df = st.session_state.df
 
 # --- TOP METRICS ---
 if not df.empty:
@@ -38,53 +36,53 @@ CATEGORIES = ["Housing & Utilities", "Food & Dining", "Transportation & Travel",
 if not df.empty:
     col1, col2 = st.columns(2)
     with col1:
+        # Pie Chart: Showing everything to ensure visuals always work
         fig_pie = px.pie(df, values='Amount', names='Category', hole=0.4,
-                         title="Spending Split by Category",
+                         title="Overall Spending Split",
                          color_discrete_sequence=px.colors.qualitative.Pastel)
         st.plotly_chart(fig_pie, use_container_width=True)
     with col2:
+        # Treemap: Detailed breakdown
         plot_df = df.copy()
         plot_df['Note'] = plot_df['Note'].fillna('General')
         fig_tree = px.treemap(plot_df, path=['Category', 'Note'], values='Amount',
-                              title="Detailed Breakdown",
+                              title="Items Breakdown",
                               color='Amount', color_continuous_scale='RdYlGn_r')
         st.plotly_chart(fig_tree, use_container_width=True)
 else:
-    st.info("No transactions found. Add one below!")
+    st.info("📊 Charts will appear here once you log your first expense.")
 
-# --- SECTION 2: ADD NEW EXPENSE (THE FIX IS HERE) ---
+# --- SECTION 2: ADD NEW EXPENSE ---
 st.divider()
 with st.expander("➕ Add New Expense", expanded=True):
     with st.form("entry_form", clear_on_submit=True):
-        amt = st.number_input("Amount (₹)", min_value=0.0, step=10.0)
+        amt = st.number_input("Amount (₹)", min_value=0.0, step=100.0)
         cat = st.selectbox("Category", CATEGORIES)
-        nte = st.text_input("Note (Optional)")
+        nte = st.text_input("Note (e.g., Grocery, Rent)")
         dte = st.date_input("Date", datetime.now())
         
         if st.form_submit_button("Save Transaction"):
-            # RE-READ DATA IMMEDIATELY to avoid overwriting other people's/previous entries
-            current_df = conn.read(ttl=0)
-            
+            # 1. Create the new row
             new_row = pd.DataFrame([{
-                "Date": dte.strftime("%Y-%m-%d"), 
+                "Date": pd.to_datetime(dte), 
                 "Amount": amt, 
                 "Category": cat, 
                 "Note": nte
             }])
             
-            # Combine current sheet data with the new row
-            updated_df = pd.concat([current_df, new_row], ignore_index=True)
+            # 2. Update local Session State immediately
+            st.session_state.df = pd.concat([st.session_state.df, new_row], ignore_index=True)
             
-            # Push back to Google Sheets
-            conn.update(data=updated_df)
+            # 3. Push the ENTIRE updated dataframe to Google Sheets
+            conn.update(data=st.session_state.df)
             
-            st.success(f"Saved ₹{amt} for {cat}!")
+            st.success(f"Successfully added ₹{amt}!")
             st.rerun()
 
 # --- SECTION 3: RECENT HISTORY ---
 st.subheader("📜 Recent History")
 if not df.empty:
-    # Formatting for display
+    # Cleanup for display
     display_df = df.copy()
     display_df['Date'] = display_df['Date'].dt.strftime('%Y-%m-%d')
     st.dataframe(display_df.sort_values(by="Date", ascending=False), use_container_width=True)
