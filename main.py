@@ -11,97 +11,105 @@ st.title("🏡 Household Hisaab Dashboard")
 # 1. CONNECTION
 conn = st.connection("gsheets", type=GSheetsConnection)
 
-# 2. ROBUST DATA LOADING
-def load_data(ttl_val=60):
+# 2. AGGRESSIVE DATA LOADING
+def load_data(ttl_val=10):
     try:
-        # We use a small cache to prevent 500 errors during navigation
-        data = conn.read(ttl=ttl_val)
-        if data is not None:
-            data = data.dropna(how='all')
-            if not data.empty:
-                data["Amount"] = pd.to_numeric(data["Amount"], errors='coerce').fillna(0)
-                data["Date"] = pd.to_datetime(data["Date"], errors='coerce')
-                return data.dropna(subset=['Date'])
+        # Pull data with a short cache to avoid 500 errors
+        raw_df = conn.read(ttl=ttl_val)
+        if raw_df is not None:
+            # Drop rows that are entirely empty
+            raw_df = raw_df.dropna(how='all')
+            # Fix column types
+            raw_df["Amount"] = pd.to_numeric(raw_df["Amount"], errors='coerce').fillna(0)
+            raw_df["Date"] = pd.to_datetime(raw_df["Date"], errors='coerce')
+            # Final filter: Must have a date and an amount > 0
+            clean_df = raw_df.dropna(subset=['Date'])
+            return clean_df[clean_df['Amount'] > 0]
     except Exception:
-        # If 500 error hits, return what we have in state or empty df
+        # Fallback to session state if Google API fails
         return st.session_state.get('df', pd.DataFrame(columns=["Date", "Amount", "Category", "Note"]))
     return pd.DataFrame(columns=["Date", "Amount", "Category", "Note"])
 
-# Initialize data
+# Initialize session state
 if "df" not in st.session_state:
     st.session_state.df = load_data()
 
 df = st.session_state.df
 
-# --- SECTION 1: INTERACTIVE TREEMAP ---
+# --- TOP METRICS ---
+if not df.empty:
+    total = df['Amount'].sum()
+    st.metric("Total Monthly Spending", f"₹{total:,.2f}")
+
+# --- SECTION 1: INTERACTIVE TREEMAP (DRILL-DOWN) ---
 CATEGORIES = ["Housing & Utilities", "Food & Dining", "Transportation & Travel", 
               "Health & Wellness", "Shopping & Lifestyle", "Education & Career", 
               "Financial & Legal", "Other/Misc"]
 
 if not df.empty:
-    st.subheader("📊 Category Drill-down")
-    # Clean data for Plotly
-    plot_df = df.copy()
-    plot_df['Note'] = plot_df['Note'].fillna('Unlabeled').replace('', 'Unlabeled')
+    st.subheader("📊 Interactive Breakdown")
+    st.caption("Tap a category to see specific items.")
     
+    plot_df = df.copy()
+    plot_df['Note'] = plot_df['Note'].fillna('General').replace('', 'General')
+    
+    # Path: Root -> Category -> Note
     fig = px.treemap(
         plot_df, 
-        path=[px.Constant("Total Spend"), 'Category', 'Note'], 
+        path=[px.Constant("All Expenses"), 'Category', 'Note'], 
         values='Amount',
-        color='Category', # Distinct colors for categories
-        color_discrete_sequence=px.colors.qualitative.Safe,
+        color='Category',
+        color_discrete_sequence=px.colors.qualitative.Pastel,
         hover_data=['Amount']
     )
+    fig.update_traces(root_color="lightgrey")
     fig.update_layout(margin=dict(t=30, l=10, r=10, b=10))
     st.plotly_chart(fig, use_container_width=True)
 else:
-    st.info("No transactions to display yet.")
+    st.info("No charts yet. Add a transaction below to see your spending split!")
 
-# --- SECTION 2: ACTIONS (ADD & DELETE) ---
+# --- SECTION 2: ADD & DELETE ---
 st.divider()
-col_add, col_del = st.columns(2)
+col_a, col_b = st.columns(2)
 
-with col_add:
+with col_a:
     with st.expander("➕ Add Expense", expanded=True):
         with st.form("add_form", clear_on_submit=True):
-            amt = st.number_input("Amount (₹)", min_value=0.0, step=50.0)
+            amt = st.number_input("Amount (₹)", min_value=0.0, step=100.0)
             cat = st.selectbox("Category", CATEGORIES)
-            nte = st.text_input("Note")
+            nte = st.text_input("Note (e.g. Electricity, Dinner)")
             dte = st.date_input("Date", datetime.now())
             
             if st.form_submit_button("Save to Cloud"):
-                # Step 1: Force a fresh read to ensure no data loss
-                latest_df = load_data(ttl_val=0)
-                # Step 2: Append
-                new_row = pd.DataFrame([{"Date": pd.to_datetime(dte), "Amount": amt, "Category": cat, "Note": nte}])
-                updated_df = pd.concat([latest_df, new_row], ignore_index=True)
-                # Step 3: Update Cloud
+                # Force refresh from cloud before saving
+                current_cloud_df = load_data(ttl_val=0)
+                new_entry = pd.DataFrame([{"Date": pd.to_datetime(dte), "Amount": amt, "Category": cat, "Note": nte}])
+                updated_df = pd.concat([current_cloud_df, new_entry], ignore_index=True)
+                
                 conn.update(data=updated_df)
-                # Step 4: Update Local State & Rerun
                 st.session_state.df = updated_df
-                st.toast("✅ Transaction Saved!")
-                time.sleep(1) # Give API a moment to breathe
+                st.toast("✅ Saved Successfully!")
+                time.sleep(1)
                 st.rerun()
 
-with col_del:
-    with st.expander("🗑️ Delete Expense"):
+with col_b:
+    with st.expander("🗑️ Delete Transaction"):
         if not df.empty:
             df_del = df.copy().reset_index()
             df_del['Label'] = df_del['Date'].dt.strftime('%d-%b') + " | " + df_del['Category'] + " | ₹" + df_del['Amount'].astype(str)
-            target_label = st.selectbox("Select to remove:", options=df_del['Label'].tolist())
+            target = st.selectbox("Select entry:", options=df_del['Label'].tolist())
             
             if st.button("Delete Permanently", type="primary"):
-                # Filter out the selected row
-                target_idx = df_del[df_del['Label'] == target_label]['index'].values[0]
-                new_df = df.drop(target_idx).reset_index(drop=True)
-                # Update Cloud & Local
+                idx = df_del[df_del['Label'] == target]['index'].values[0]
+                new_df = df.drop(idx).reset_index(drop=True)
+                
                 conn.update(data=new_df)
                 st.session_state.df = new_df
-                st.toast("🗑️ Entry Removed")
+                st.toast("🗑️ Entry Deleted")
                 time.sleep(1)
                 st.rerun()
 
 # --- SECTION 3: HISTORY ---
-st.subheader("📜 History")
+st.subheader("📜 Recent History")
 if not df.empty:
     st.dataframe(df.sort_values(by="Date", ascending=False), use_container_width=True)
